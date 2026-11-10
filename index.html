@@ -92,6 +92,11 @@ button:focus-visible,input:focus-visible,select:focus-visible,summary:focus-visi
         <label class="opt"><input type="radio" name="mode" value="speech" checked> 手机听写（快，推荐）</label>
         <label class="opt"><input type="radio" name="mode" value="audio"> 录音交给 Gemini 听（术语更准，稍慢）</label>
       </div>
+      <label>识别语言（正在听时改了，要先停止再开始）</label>
+      <div class="row">
+        <label class="opt"><input type="radio" name="lang" value="ko" checked> 韩语</label>
+        <label class="opt"><input type="radio" name="lang" value="zh"> 中文（显示中文原文、韩语翻译和建议的韩语回答，要联网）</label>
+      </div>
       <label>教授停顿多久算问完（句尾听到 까/요/죠 这类问句结尾时只等 1.2 秒）</label>
       <div class="row">
         <label class="opt"><input type="radio" name="wait" value="1800"> 1.8 秒</label>
@@ -146,7 +151,12 @@ document.querySelectorAll('input[name="wait"]').forEach(r => r.onchange = () => 
 const waitMs = () => +opt("wait");
 // a Korean question usually ends in one of these; then a short pause is enough
 const QEND = /(까|까요|나요|가요|죠|지요|세요|는지|은지|냐|니|요)\s*[?？.!]?\s*$/;
-const endsLikeQuestion = s => QEND.test(s.trim());
+const QEND_ZH = /(吗|呢|么|吧)\s*[?？。!！]?\s*$|[?？]\s*$/;
+// recognition language: Korean (default) or Chinese; fixed for one listening session
+{ const l = document.querySelector(`input[name="lang"][value="${S.get("da_lang", "ko")}"]`); if (l) l.checked = true; }
+document.querySelectorAll('input[name="lang"]').forEach(r => r.onchange = () => S.set("da_lang", r.value));
+let ZH = S.get("da_lang", "ko") === "zh";
+const endsLikeQuestion = s => (ZH ? QEND_ZH : QEND).test(s.trim());
 
 function setState(text, cls){ const p = $("#state"); p.className = "pill " + (cls || ""); p.lastElementChild.textContent = text; }
 
@@ -299,7 +309,16 @@ ${d.brief}
 
 <论文摘要节选>
 ${d.abstract}
-</论文摘要节选>`;
+</论文摘要节选>` + (ZH ? `
+
+【本次识别语言：中文。以下规则优先于上面的输出格式】
+这次听到的话是中文，把它当作需要用韩语回应的提问或评论。输出格式改为：
+T: 这段话的中文原文（只有收到音频时才写这一行）
+KT: 把这段中文翻译成韩语（합니다체，忠实原意，不回答）
+KO: 建议的韩语回答的一句
+PR: 这一句的罗马字发音（只有要求时才写）
+ZH: 这一句韩语回答的中文意思
+按 KO/PR/ZH 的顺序重复。不要写 Q 行，不要把中文原文再翻译成中文。只有明显是噪音或无意义的碎片时才只输出 SKIP。` : "");
 }
 let profBuf = [];   // recent professor utterances {at, text}
 let shown = null;   // answer currently on screen {q, items, heard}
@@ -311,7 +330,8 @@ function userText(latest, isAudio){
   if (recent.length) s += "<教授前面刚说过的话>\n" + recent.join("\n") + "\n</教授前面刚说过的话>\n";
   if (shown) s += "<学生屏幕上当前的回答，学生可能正在念它>\n" + shownKO() + "\n</学生屏幕上当前的回答>\n";
   s += `本次回答 ${n} 句；${pr ? "每个 KO 行后面写 PR 行" : "不要写 PR 行"}。\n`;
-  if (isAudio) s += "下面的音频是教室里刚录到的一段话。先写 T 行。";
+  if (isAudio) s += ZH ? "下面的音频是刚录到的一段中文。先写 T 行（中文原文），再写 KT 行。" : "下面的音频是教室里刚录到的一段话。先写 T 行。";
+  else if (ZH) s += "<刚听到的一段中文（手机语音识别结果）>\n" + latest + "\n</刚听到的一段中文>\n先写 KT 行。";
   else s += "<刚听到的一段话（手机语音识别结果）>\n" + latest + "\n</刚听到的一段话>";
   return s;
 }
@@ -359,11 +379,11 @@ function matchQ(index, text){
 
 /* ---------------- answer rendering ---------------- */
 function parse(text){
-  const a = { t: "", q: "", items: [], skip: /^\s*SKIP\b/i.test(text) };
+  const a = { t: "", q: "", kt: "", items: [], skip: /^\s*SKIP\b/i.test(text) };
   for (const raw of text.split("\n")) {
-    const m = raw.trim().match(/^(T|Q|KO|PR|ZH)\s*[:：]\s*(.*)$/i); if (!m) continue;
+    const m = raw.trim().match(/^(T|Q|KT|KO|PR|ZH)\s*[:：]\s*(.*)$/i); if (!m) continue;
     const tag = m[1].toUpperCase(), v = m[2].trim();
-    if (tag === "T") a.t = v; else if (tag === "Q") a.q = v;
+    if (tag === "T") a.t = v; else if (tag === "Q") a.q = v; else if (tag === "KT") a.kt = v;
     else if (tag === "KO") a.items.push({ ko: v, pr: "", zh: "" });
     else { const l = a.items[a.items.length - 1]; if (l) l[tag === "PR" ? "pr" : "zh"] = v; }
   }
@@ -373,6 +393,8 @@ function drawAnswer(box, a, heard){
   box.replaceChildren();
   if (a.q) box.append(el("div", "qmean", "教授在问：" + a.q));
   if (heard || a.t) box.append(el("div", "heard", "听到：" + (a.t || heard)));
+  if (a.kt) { const k = el("div", "pair"), t = el("div", "ko", a.kt); t.style.fontSize = "1.05rem"; t.style.fontWeight = "500"; k.append(el("div", "zh", "韩语翻译："), t); box.append(k); }
+  if (a.kt && a.items.length) box.append(el("div", "zh", "建议的韩语回答："));
   for (const it of a.items) {
     const p = el("div", "pair"); p.append(el("div", "ko", it.ko));
     if (it.pr) p.append(el("div", "pr", it.pr)); if (it.zh) p.append(el("div", "zh", it.zh));
@@ -400,7 +422,7 @@ async function respond(latest, audioB64, force, quiet){
   if (!quiet) {
     // say at once that this one is being written online, so the screen never looks stuck
     pushHistory(); shown = null;
-    box.replaceChildren(el("div", "qmean", "问答稿里没有这题，正在联网生成…"), el("div", "heard", "听到：" + latest));
+    box.replaceChildren(el("div", "qmean", ZH ? "正在联网翻译并生成韩语回答…" : "问答稿里没有这题，正在联网生成…"), el("div", "heard", "听到：" + latest));
   }
   try {
     const text = await gemini(systemText(), parts, g.ctl.signal, t => {
@@ -461,6 +483,7 @@ function isReadingAnswer(text){
 let lastUtt = null;   // previous professor piece {text, at, q}
 function onUtteranceText(text, startedAt){
   text = text.trim();
+  if (ZH) return onChineseText(text, startedAt);
   if ((text.match(/[가-힣]/g) || []).length < 4) return;
   if (isReadingAnswer(text)) { $("#caption").textContent = "（你在念回答，已忽略）" + text; return; }
   // the professor paused mid-question and went on: join the pieces and answer the whole question.
@@ -481,6 +504,17 @@ function onUtteranceText(text, startedAt){
     else setState(listening ? "在听" : "未开始", listening ? "on" : "");
   } else if (useGemini) respond(text, null);
   else $("#caption").textContent = "问答稿里没找到对应的问题：" + text;
+}
+// Chinese mode: the prepared Q&A is Korean, so every piece goes online for a Korean translation and answer
+function onChineseText(text, startedAt){
+  if ((text.match(/[一-鿿]/g) || []).length < 3) return;
+  const gap = lastUtt && startedAt ? startedAt - lastUtt.at : Infinity;
+  const merge = gap < (lastUtt && lastUtt.q ? 3000 : 6000);
+  if (merge) { text = lastUtt.text + " " + text; profBuf = profBuf.filter(u => u.text !== lastUtt.text); }
+  lastUtt = { text, at: Date.now(), q: endsLikeQuestion(text) };
+  profBuf.push({ at: Date.now(), text }); profBuf = profBuf.slice(-6);
+  if (merge) shown = null;   // the half-heard piece is replaced, not kept in history
+  respond(text, null);
 }
 function showLocal(i, heard, score, alts, toHistory){
   const it = DATA.prep[i], title = it.q_zh.replace(/^\d+\.\s*/, "");
@@ -518,10 +552,10 @@ let listening = false, rec = null, recActive = false, full = "", consumedH = 0, 
 // Safari keeps revising text it already returned (spacing, punctuation, a word or two) a second after
 // the pause. Positions are therefore counted in letters only, so a revision of the last question does
 // not look like new speech and does not cancel the answer being written.
-const isH = ch => /[가-힣A-Za-z0-9]/.test(ch);
+const isH = ch => /[가-힣A-Za-z0-9]/.test(ch) || (ZH && /[一-鿿]/.test(ch));
 function countH(s){ let n = 0; for (const ch of s) if (isH(ch)) n++; return n; }
 function afterH(s, n){ let i = 0; for (const ch of s) { if (n <= 0) break; if (isH(ch)) n--; i += ch.length; } return s.slice(i); }
-const pendingText = () => afterH(full, consumedH).replace(/^[^가-힣A-Za-z0-9]+/, "").trim();
+const pendingText = () => afterH(full, consumedH).replace(ZH ? /^[^가-힣A-Za-z0-9一-鿿]+/ : /^[^가-힣A-Za-z0-9]+/, "").trim();
 function joinResults(results){
   // iPhone sometimes repeats earlier text inside later results; keep only the longest version of a run
   const parts = [];
@@ -552,7 +586,7 @@ function needTap(){
 function startRec(){
   if (!listening) return;
   try { rec && rec.abort(); } catch {}
-  const r = rec = new SR(); r.lang = "ko-KR"; r.continuous = true; r.interimResults = true; r.maxAlternatives = 1;
+  const r = rec = new SR(); r.lang = ZH ? "zh-CN" : "ko-KR"; r.continuous = true; r.interimResults = true; r.maxAlternatives = 1;
   r.onstart = () => { if (rec !== r) return; recActive = true; full = ""; consumedH = 0; setState("在听", "on"); };
   r.onresult = e => {
     if (rec !== r) return;
@@ -666,6 +700,9 @@ function stopAll(){
 }
 $("#toggle").onclick = async () => {
   if (listening) { stopAll(); return; }
+  ZH = opt("lang") === "zh";
+  $("#caption").lang = ZH ? "zh-CN" : "ko";
+  if (ZH && !S.get("da_key", "")) { $("#setup").open = true; $("#answer").replaceChildren(el("p", "note", "中文识别要靠 Gemini 翻译和生成回答：先在「设置」里保存 Gemini Key。")); return; }
   if (!S.get("da_key", "") && (opt("mode") === "audio" || $("#useGemini").checked)) { $("#setup").open = true; $("#answer").replaceChildren(el("p", "note", "先在「设置」里保存 Gemini Key；只用问答稿的话，取消勾选「再用 Gemini 现场生成」。")); return; }
   if (!DATA) { $("#setup").open = true; $("#answer").replaceChildren(el("p", "note", "先在「设置」里输入资料密码解锁。")); return; }
   const mode = opt("mode");
@@ -692,6 +729,8 @@ $("#toggle").onclick = async () => {
 
 $("#testBtn").onclick = async () => {
   if (!DATA) { $("#testMsg").textContent = "先解锁资料。"; return; }
+  if (!listening) ZH = opt("lang") === "zh";
+  if (ZH) { shown = null; lastUtt = null; onUtteranceText("这个研究最重要的贡献是什么？"); $("#testMsg").textContent = "中文测试题已交给 Gemini，上面会显示韩语翻译和建议回答。"; return; }
   // two different questions in a row, the way the defense goes
   const qs = ["이 연구의 가장 중요한 기여는 무엇입니까?", "데이터는 어디에서 구했습니까?"];
   const t0 = performance.now();
